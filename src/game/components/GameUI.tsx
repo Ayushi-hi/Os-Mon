@@ -1,0 +1,204 @@
+import { useEffect, useRef } from 'react'
+import { useGame } from '../../context/GameContext'
+import { xpForLevel } from '../systems/battleSystem'
+
+const AREA_COLORS: Record<string, string> = {
+  'CPU Valley':        '#44aaff',
+  'Process Plains':    '#66dd44',
+  'Memory Mountains':  '#8866ff',
+  'File Forest':       '#44cc66',
+  'Sync Sanctuary':    '#cc44ff',
+  'Network Nexus':     '#00ccff',
+  'Kernel Castle':     '#ff6600',
+}
+
+function XpBar({ xp, lv }: { xp: number; lv: number }) {
+  const needed = xpForLevel(lv + 1)
+  const pct = Math.min(100, (xp / needed) * 100)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+      <span className="font-pixel" style={{ fontSize: 6, color: '#3366ff', minWidth: 18 }}>XP</span>
+      <div style={{ flex: 1, height: 4, background: 'rgba(0,0,0,0.5)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: '#3366ff', borderRadius: 2, transition: 'width 0.4s ease' }} />
+      </div>
+      <span className="font-pixel" style={{ fontSize: 6, color: '#2244aa', minWidth: 28, textAlign: 'right' }}>
+        {xp}/{needed}
+      </span>
+    </div>
+  )
+}
+
+function HpBarMini({ cur, max }: { cur: number; max: number }) {
+  const pct = Math.max(0, Math.min(100, (cur / max) * 100))
+  const col = pct > 50 ? '#3db83d' : pct > 20 ? '#d4a017' : '#c82020'
+  return (
+    <div style={{ height: 4, background: 'rgba(0,0,0,0.5)', borderRadius: 2, overflow: 'hidden' }}>
+      <div style={{ height: '100%', width: `${pct}%`, background: col, borderRadius: 2, transition: 'width 0.3s ease' }} />
+    </div>
+  )
+}
+
+export default function GameUI() {
+  const { state, dispatch } = useGame()
+  const lvUpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Close menus on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName.toLowerCase()
+      if (['input', 'textarea', 'button', 'select'].includes(tag)) return
+      if (e.key === 'Escape') {
+        if (state.phase === 'inventory' || state.phase === 'quiz')
+          dispatch({ type: 'SET_PHASE', phase: 'exploring' })
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [state.phase, dispatch])
+
+  // Auto-clear levelUpMsg after 3.2s using correct action
+  useEffect(() => {
+    if (!state.levelUpMsg) return
+    if (lvUpTimerRef.current) clearTimeout(lvUpTimerRef.current)
+    lvUpTimerRef.current = setTimeout(() => {
+      dispatch({ type: 'CLEAR_LEVEL_UP_MSG' })
+    }, 3200)
+    return () => { if (lvUpTimerRef.current) clearTimeout(lvUpTimerRef.current) }
+  }, [state.levelUpMsg, dispatch])
+
+  if (state.phase !== 'exploring') return null
+
+  const areaColor = AREA_COLORS[state.currentArea] ?? '#e8a020'
+  const party = state.party
+  const lead = party[0]
+
+  return (
+    <>
+      {/* ── TOP-LEFT: Area name ── */}
+      <div className="absolute top-4 left-4 z-10 pointer-events-none"
+        style={{ animation: 'fadeIn 0.4s ease-out' }}>
+        <div style={{
+          background: 'rgba(4,4,16,0.85)',
+          borderLeft: `3px solid ${areaColor}`,
+          padding: '6px 14px 6px 10px',
+          backdropFilter: 'blur(8px)',
+        }}>
+          <div className="font-pixel" style={{ fontSize: 9, color: areaColor, letterSpacing: '0.05em' }}>
+            {state.currentArea.toUpperCase()}
+          </div>
+          <div className="font-vt" style={{ fontSize: 13, color: '#445566', marginTop: 1 }}>
+            {state.caught.size}/18 caught &nbsp;·&nbsp; {state.seen.size}/18 seen
+          </div>
+        </div>
+      </div>
+
+      {/* ── TOP-RIGHT: Controls + Menu ── */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-3">
+        <div style={{
+          background: 'rgba(4,4,16,0.75)', padding: '5px 10px', backdropFilter: 'blur(8px)',
+        }}>
+          <div className="font-pixel" style={{ fontSize: 6, color: '#334455', lineHeight: 1.9 }}>
+            WASD MOVE · E TALK/QUIZ · SPACE MENU
+          </div>
+        </div>
+        <button
+          className="font-pixel cursor-pointer"
+          style={{
+            fontSize: 8, padding: '7px 14px',
+            background: 'rgba(4,4,16,0.85)',
+            color: areaColor, border: `1px solid ${areaColor}55`,
+            backdropFilter: 'blur(8px)', transition: 'all 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = `${areaColor}22`)}
+          onMouseLeave={e => (e.currentTarget.style.background = 'rgba(4,4,16,0.85)')}
+          onClick={() => dispatch({ type: 'SET_PHASE', phase: 'inventory' })}>
+          MENU
+        </button>
+      </div>
+
+      {/* ── BOTTOM-LEFT: Party roster ── */}
+      {party.length > 0 && (
+        <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1.5 pointer-events-none">
+          {party.slice(0, 4).map((mon, i) => (
+            <div key={i} style={{
+              background: 'rgba(4,4,16,0.88)',
+              border: `1px solid rgba(255,255,255,0.07)`,
+              padding: '5px 10px', minWidth: 180,
+              backdropFilter: 'blur(8px)',
+              opacity: mon.curHp <= 0 ? 0.45 : 1,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }}>
+                <div style={{
+                  width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                  background: mon.curHp <= 0 ? '#555'
+                    : mon.curHp > mon.maxHp * 0.5 ? '#3db83d'
+                    : mon.curHp > mon.maxHp * 0.2 ? '#d4a017' : '#c82020',
+                }} />
+                <span className="font-pixel" style={{ fontSize: 7, color: '#aabbcc', flex: 1, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  {mon.name.slice(0, 10)}{mon.curHp <= 0 ? ' ✕' : ''}
+                </span>
+                <span className="font-pixel" style={{ fontSize: 7, color: '#e8a020' }}>
+                  Lv.{mon.lv}
+                </span>
+              </div>
+              <HpBarMini cur={mon.curHp} max={mon.maxHp} />
+              {i === 0 && (
+                <div style={{ marginTop: 3 }}>
+                  <XpBar xp={mon.xp ?? 0} lv={mon.lv} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── BOTTOM-RIGHT: Item counts ── */}
+      <div className="absolute bottom-4 right-4 z-10 pointer-events-none">
+        <div style={{
+          background: 'rgba(4,4,16,0.85)', border: '1px solid rgba(255,255,255,0.07)',
+          padding: '6px 12px', backdropFilter: 'blur(8px)',
+          display: 'flex', gap: 14, alignItems: 'center',
+        }}>
+          {[
+            { label: 'KBALL', val: state.items.kernelball, col: '#88ccff' },
+            { label: 'SBALL', val: state.items.superball,  col: '#aaddff' },
+            { label: 'POT',   val: state.items.potion,     col: '#88ff88' },
+          ].map((item, i) => (
+            <div key={i} style={{ textAlign: 'center' }}>
+              <div className="font-pixel" style={{ fontSize: 6, color: '#334' }}>{item.label}</div>
+              <div className="font-pixel" style={{ fontSize: 12, color: item.col }}>{item.val}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── LEVEL UP NOTIFICATION ── */}
+      {state.levelUpMsg && (
+        <div
+          className="absolute z-50"
+          style={{
+            top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+            background: 'rgba(4,4,16,0.97)',
+            border: '2px solid #e8a020',
+            padding: '18px 32px', textAlign: 'center',
+            animation: 'slideUp 0.3s ease-out',
+            cursor: 'pointer',
+            pointerEvents: 'auto',
+          }}
+          onClick={() => dispatch({ type: 'CLEAR_LEVEL_UP_MSG' })}>
+          <div className="font-pixel" style={{ fontSize: 8, color: '#e8a020', marginBottom: 6 }}>
+            ★ LEVEL UP! ★
+          </div>
+          {state.levelUpMsg.split(' | ').map((msg, i) => (
+            <div key={i} className="font-vt" style={{ fontSize: 20, color: '#88ff88', lineHeight: 1.5 }}>
+              {msg}
+            </div>
+          ))}
+          <div className="font-pixel" style={{ fontSize: 6, color: '#445566', marginTop: 8 }}>
+            click or wait to close
+          </div>
+        </div>
+      )}
+    </>
+  )
+}

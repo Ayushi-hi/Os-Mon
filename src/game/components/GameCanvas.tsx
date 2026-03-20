@@ -1,0 +1,664 @@
+import { useEffect, useRef, useCallback } from 'react'
+import * as THREE from 'three'
+import { useGame } from '../../context/GameContext'
+import { AREAS, TileType, NpcData, Area } from '../data/areas'
+import { inputHandler } from '../systems/inputHandler'
+
+const T = 2.4
+const MOVE_COOLDOWN = 170
+
+function tileWalkable(t: TileType): boolean {
+  return ![1, 2, 4].includes(t)
+}
+
+function makeHumanoid(bodyColor: number, hatColor: number, legsColor: number, scale = 1.0): THREE.Group {
+  const g = new THREE.Group()
+  const mat = (c: number) => new THREE.MeshLambertMaterial({ color: c })
+  const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d)
+
+  const body = new THREE.Mesh(box(0.68, 0.88, 0.42), mat(bodyColor))
+  body.position.y = 0.88; body.castShadow = true; g.add(body)
+  const head = new THREE.Mesh(box(0.58, 0.58, 0.58), mat(0xffcc99))
+  head.position.y = 1.62; head.castShadow = true; g.add(head)
+  const hat = new THREE.Mesh(box(0.63, 0.24, 0.63), mat(hatColor))
+  hat.position.y = 2.02; g.add(hat)
+  const brim = new THREE.Mesh(box(0.78, 0.07, 0.78), mat(hatColor))
+  brim.position.y = 1.90; g.add(brim)
+  const legL = new THREE.Mesh(box(0.26, 0.50, 0.28), mat(legsColor))
+  legL.position.set(-0.17, 0.28, 0); legL.castShadow = true; g.add(legL)
+  const legR = new THREE.Mesh(box(0.26, 0.50, 0.28), mat(legsColor))
+  legR.position.set( 0.17, 0.28, 0); legR.castShadow = true; g.add(legR)
+  const armL = new THREE.Mesh(box(0.20, 0.58, 0.24), mat(bodyColor))
+  armL.position.set(-0.46, 0.88, 0); armL.castShadow = true; g.add(armL)
+  const armR = new THREE.Mesh(box(0.20, 0.58, 0.24), mat(bodyColor))
+  armR.position.set( 0.46, 0.88, 0); armR.castShadow = true; g.add(armR)
+  const eyeM = mat(0x111111)
+  const eyeL = new THREE.Mesh(box(0.10, 0.09, 0.04), eyeM)
+  eyeL.position.set(-0.13, 1.65, 0.30); g.add(eyeL)
+  const eyeR = new THREE.Mesh(box(0.10, 0.09, 0.04), eyeM)
+  eyeR.position.set( 0.13, 1.65, 0.30); g.add(eyeR)
+  g.scale.setScalar(scale)
+  g.userData.legL = legL; g.userData.legR = legR
+  g.userData.armL = armL; g.userData.armR = armR
+  return g
+}
+
+function makePortalGate(color: number, isNS: boolean): THREE.Group {
+  const g = new THREE.Group()
+  const pH = 3.2
+  const spread = T * 0.9
+
+  const matPost = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(0.35) })
+  const matBar  = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(0.55) })
+  const matFill = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.22, side: THREE.DoubleSide })
+
+  // Two pillars
+  const pA = new THREE.Mesh(new THREE.BoxGeometry(0.30, pH, 0.30), matPost)
+  const pB = new THREE.Mesh(new THREE.BoxGeometry(0.30, pH, 0.30), matPost)
+  if (isNS) { pA.position.set(-spread, pH/2, 0); pB.position.set(spread, pH/2, 0) }
+  else       { pA.position.set(0, pH/2, -spread); pB.position.set(0, pH/2,  spread) }
+  pA.castShadow = true; pB.castShadow = true
+  g.add(pA); g.add(pB)
+
+  // Top bar
+  const barW = isNS ? spread*2 + 0.30 : 0.30
+  const barD = isNS ? 0.30 : spread*2 + 0.30
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(barW, 0.26, barD), matBar)
+  bar.position.y = pH + 0.13; g.add(bar)
+
+  // Glowing fill
+  const fillW = isNS ? spread*2 - 0.1 : 0.08
+  const fillD = isNS ? 0.08 : spread*2 - 0.1
+  const fill = new THREE.Mesh(new THREE.PlaneGeometry(
+    isNS ? spread*2 - 0.1 : 0.08,
+    pH - 0.3
+  ), matFill)
+  fill.position.y = pH/2 + 0.1
+  if (!isNS) fill.rotation.y = Math.PI / 2
+  g.add(fill)
+
+  // Pulsing light
+  const pl = new THREE.PointLight(color, 2.2, 9)
+  pl.position.y = pH * 0.6
+  g.add(pl)
+  g.userData.pointLight = pl
+
+  // Cap gems on top of pillars
+  const gemMat = new THREE.MeshLambertMaterial({ color, emissive: new THREE.Color(color).multiplyScalar(0.8) })
+  const gem = () => new THREE.Mesh(new THREE.OctahedronGeometry(0.22), gemMat)
+  const gA = gem(); const gB = gem()
+  if (isNS) { gA.position.set(-spread, pH + 0.35, 0); gB.position.set(spread, pH + 0.35, 0) }
+  else       { gA.position.set(0, pH + 0.35, -spread); gB.position.set(0, pH + 0.35,  spread) }
+  gA.userData.isGem = true; gB.userData.isGem = true
+  g.add(gA); g.add(gB)
+
+  return g
+}
+
+export default function GameCanvas() {
+  const mountRef        = useRef<HTMLDivElement>(null)
+  const rendererRef     = useRef<THREE.WebGLRenderer | null>(null)
+  const sceneRef        = useRef<THREE.Scene | null>(null)
+  const cameraRef       = useRef<THREE.PerspectiveCamera | null>(null)
+  const sunRef          = useRef<THREE.DirectionalLight | null>(null)
+  const ambientRef      = useRef<THREE.AmbientLight | null>(null)
+  const playerRef       = useRef<THREE.Group | null>(null)
+  const worldGroupRef   = useRef<THREE.Group | null>(null)
+  const npcGroupsRef    = useRef<THREE.Group[]>([])
+  const portalGroupsRef = useRef<THREE.Group[]>([])
+  const waterMeshesRef  = useRef<THREE.Mesh[]>([])
+  const particlesRef    = useRef<THREE.Points | null>(null)
+  const frameRef        = useRef(0)
+  const lastMoveRef     = useRef(0)
+  const playerTargetRef = useRef(new THREE.Vector3())
+  const playerRotRef    = useRef(0)  // target Y rotation, lerped every frame
+  const initDoneRef     = useRef(false)
+
+  // Keep latest state in a ref so animation loop & buildWorld always have current values
+  const { state, dispatch } = useGame()
+  const stateRef = useRef(state)
+  useEffect(() => { stateRef.current = state }, [state])
+
+  // ── Build world geometry ───────────────────────────────────────────────────
+  const buildWorld = useCallback((areaKey: string) => {
+    const scene = sceneRef.current
+    if (!scene) return
+
+    // Tear down old world
+    if (worldGroupRef.current) { scene.remove(worldGroupRef.current); worldGroupRef.current = null }
+    npcGroupsRef.current = []
+    portalGroupsRef.current = []
+    waterMeshesRef.current = []
+    if (particlesRef.current) { scene.remove(particlesRef.current); particlesRef.current = null }
+
+    const area = AREAS[areaKey]
+    if (!area) return
+    const a = area.atmo
+
+    // Update scene atmosphere
+    scene.background = new THREE.Color(a.skyBottom)
+    scene.fog = new THREE.FogExp2(a.fogColor, a.fogDensity)
+    if (sunRef.current) { sunRef.current.color.set(a.sunColor); sunRef.current.intensity = a.sunIntensity }
+    if (ambientRef.current) { ambientRef.current.color.set(a.ambientColor); ambientRef.current.intensity = a.ambientIntensity }
+
+    const portalColors: Record<string, number> = {
+      'CPU Valley': 0x44aaff, 'Process Plains': 0x44ff88,
+      'Memory Mountains': 0x8866ff, 'File Forest': 0x44cc44,
+      'Sync Sanctuary': 0xcc44ff, 'Network Nexus': 0x00ccff,
+      'Kernel Castle': 0xff5500,
+    }
+
+    const wg = new THREE.Group()
+    worldGroupRef.current = wg
+    scene.add(wg)
+
+    // Ground
+    const gnd = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: a.groundColor }))
+    gnd.rotation.x = -Math.PI / 2; gnd.receiveShadow = true; wg.add(gnd)
+
+    const waters: THREE.Mesh[] = []
+
+    for (let row = 0; row < area.map.length; row++) {
+      for (let col = 0; col < area.map[row].length; col++) {
+        const t = area.map[row][col] as TileType
+        const wx = col * T + T * 0.5
+        const wz = row * T + T * 0.5
+
+        if (t === 1) {
+          // Tree
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.22, 0.30, 1.4, 7),
+            new THREE.MeshLambertMaterial({ color: a.treeTrunkColor })
+          )
+          trunk.position.set(wx, 0.7, wz); trunk.castShadow = true; wg.add(trunk)
+          for (let fi = 0; fi < 3; fi++) {
+            const fCol = new THREE.Color(a.treeColor).lerp(new THREE.Color(0x88ff44), fi * 0.12)
+            const cone = new THREE.Mesh(
+              new THREE.ConeGeometry(0.95 - fi * 0.16, 0.88, 7),
+              new THREE.MeshLambertMaterial({ color: fCol })
+            )
+            cone.position.set(wx, 1.4 + fi * 0.70, wz); cone.castShadow = true; wg.add(cone)
+          }
+
+        } else if (t === 2) {
+          // Wall — border/mountain = tall; interior building = shorter with roof
+          const onBorder = row===0 || row===area.rows-1 || col===0 || col===area.cols-1
+          const isCastle = areaKey === 'Kernel Castle'
+          const isMountain = ['Memory Mountains','Sync Sanctuary','Network Nexus'].includes(areaKey)
+          const wallH = onBorder
+            ? (isCastle ? 3.2 : isMountain ? 2.8 : 2.4)
+            : 2.0
+          const wallCol = (!onBorder && a.buildingColor) ? a.buildingColor : a.wallColor
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(T, wallH, T),
+            new THREE.MeshLambertMaterial({ color: wallCol }))
+          wall.position.set(wx, wallH/2, wz); wall.castShadow = true; wg.add(wall)
+          // Castle crenellations on outer border
+          if (isCastle && onBorder) {
+            for (let ci = 0; ci < 2; ci++) {
+              const cr = new THREE.Mesh(new THREE.BoxGeometry(0.44,0.40,0.44),
+                new THREE.MeshLambertMaterial({ color: new THREE.Color(wallCol).addScalar(0.06) }))
+              cr.position.set(wx-0.44+ci*0.88, wallH+0.20, wz); wg.add(cr)
+            }
+          }
+          // Interior building walls get a roof cap
+          if (!onBorder) {
+            const roofCol = a.buildingRoofColor ?? a.wallColor
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(T+0.10,0.20,T+0.10),
+              new THREE.MeshLambertMaterial({ color: roofCol }))
+            roof.position.set(wx, wallH+0.10, wz); wg.add(roof)
+          }
+
+        } else if (t === 4) {
+          // Water
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(T - 0.06, 0.14, T - 0.06),
+            new THREE.MeshLambertMaterial({ color: a.waterColor, transparent: true, opacity: 0.85 })
+          )
+          mesh.position.set(wx, 0.07, wz)
+          mesh.userData.baseHex = a.waterColor
+          wg.add(mesh); waters.push(mesh)
+
+        } else if (t === 5) {
+          // Tall grass
+          const base = new THREE.Mesh(new THREE.BoxGeometry(T, 0.16, T),
+            new THREE.MeshLambertMaterial({ color: a.tallGrassColor }))
+          base.position.set(wx, 0.08, wz); wg.add(base)
+          const bladeCol = new THREE.Color(a.tallGrassColor).lerp(new THREE.Color(0xffffff), 0.28)
+          for (let b = 0; b < 5; b++) {
+            const bx2 = (Math.random() - 0.5) * (T - 0.4)
+            const bz2 = (Math.random() - 0.5) * (T - 0.4)
+            const blade = new THREE.Mesh(
+              new THREE.BoxGeometry(0.09, 0.32 + Math.random() * 0.26, 0.09),
+              new THREE.MeshLambertMaterial({ color: bladeCol })
+            )
+            blade.position.set(wx + bx2, 0.30, wz + bz2); wg.add(blade)
+          }
+
+        } else if (t === 6) {
+          // Portal gate — orientation derived from which map edge it sits on
+          const portal = area.portals.find(p => p.x === col && p.y === row)
+          const gateCol = portalColors[portal?.to ?? ''] ?? 0xffffff
+          // edge: 'left'|'right' = gate spans N-S (pillars along Z axis)
+          // edge: 'top'|'bottom' = gate spans E-W (pillars along X axis)
+          const edge = portal?.edge ?? (row === 0 || row === area.rows-1 ? 'top' : 'left')
+          const isNS = edge === 'left' || edge === 'right'
+          const gate = makePortalGate(gateCol, isNS)
+          gate.position.set(wx, 0, wz)
+          gate.userData.portalData = portal
+          wg.add(gate)
+          portalGroupsRef.current.push(gate)
+          // Bright path underfoot
+          const p = new THREE.Mesh(new THREE.BoxGeometry(T, 0.12, T),
+            new THREE.MeshLambertMaterial({ color: new THREE.Color(a.pathColor).lerp(new THREE.Color(gateCol), 0.25) }))
+          p.position.set(wx, 0.06, wz); wg.add(p)
+
+        } else if (t === 7) {
+          // Quiz station
+          const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.72, 2.0, 0.72),
+            new THREE.MeshLambertMaterial({ color: 0x110e2a }))
+          pillar.position.set(wx, 1.0, wz); pillar.castShadow = true; wg.add(pillar)
+          const screen = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.46, 0.06),
+            new THREE.MeshLambertMaterial({ color: 0x3300cc, emissive: 0x1100aa }))
+          screen.position.set(wx, 1.88, wz + 0.38); wg.add(screen)
+          const orb = new THREE.Mesh(new THREE.OctahedronGeometry(0.30),
+            new THREE.MeshLambertMaterial({ color: 0xaa44ff, emissive: 0x5500bb }))
+          orb.position.set(wx, 2.65, wz); orb.userData.isQuizOrb = true; wg.add(orb)
+          const qpl = new THREE.PointLight(0xaa44ff, 2.0, 7)
+          qpl.position.set(wx, 2.65, wz); wg.add(qpl)
+          const base2 = new THREE.Mesh(new THREE.BoxGeometry(T, 0.12, T),
+            new THREE.MeshLambertMaterial({ color: a.pathColor }))
+          base2.position.set(wx, 0.06, wz); wg.add(base2)
+
+        } else if (t === 9) {
+          // Flower/crystal
+          const isGloomy = ['Sync Sanctuary','Kernel Castle','File Forest','Network Nexus','Memory Mountains'].includes(areaKey)
+          const base3 = new THREE.Mesh(new THREE.BoxGeometry(T, 0.14, T),
+            new THREE.MeshLambertMaterial({ color: a.grassColor }))
+          base3.position.set(wx, 0.07, wz); wg.add(base3)
+          const petalCol = isGloomy
+            ? new THREE.Color(a.particleColor ?? 0xff88ff)
+            : new THREE.Color().setHSL(Math.random() * 0.4 + 0.7, 0.9, 0.65)
+          const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.36, 5),
+            new THREE.MeshLambertMaterial({ color: new THREE.Color(a.treeColor) }))
+          stem.position.set(wx, 0.32, wz); wg.add(stem)
+          const petal = new THREE.Mesh(new THREE.SphereGeometry(0.21, 7, 5),
+            new THREE.MeshLambertMaterial({ color: petalCol, emissive: isGloomy ? petalCol.clone().multiplyScalar(0.28) : 0 as unknown as THREE.ColorRepresentation }))
+          petal.position.set(wx, 0.56, wz); wg.add(petal)
+
+        } else {
+          // GRASS(0), PATH(3), NPC_SPAWN(8) — flat tile
+          const tileH = t === 3 ? 0.10 : 0.14
+          const tileCol = t === 3 ? a.pathColor : a.grassColor
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(T, tileH, T),
+            new THREE.MeshLambertMaterial({ color: tileCol }))
+          mesh.position.set(wx, tileH / 2, wz); mesh.receiveShadow = true; wg.add(mesh)
+        }
+      }
+    }
+
+    waterMeshesRef.current = waters
+
+    // NPCs
+    const npcHatColors = [0xff8800, 0x44aaff, 0x44ff88, 0xee44bb, 0xffcc00, 0xff4444, 0x22ddbb]
+    area.npcs.forEach((npc, i) => {
+      const col = parseInt(npc.color.replace('#', ''), 16)
+      const nm = makeHumanoid(col, npcHatColors[i % npcHatColors.length], 0x334455, 0.88)
+      nm.position.set(npc.x * T + T * 0.5, 0, npc.y * T + T * 0.5)
+      nm.userData.npcIndex = i
+      wg.add(nm)
+      npcGroupsRef.current.push(nm)
+    })
+
+    // Ambient particles
+    if (a.particleColor) {
+      const count = 100
+      const pos = new Float32Array(count * 3)
+      const mapW2 = area.map[0].length * T
+      const mapH2 = area.map.length * T
+      for (let i = 0; i < count; i++) {
+        pos[i*3]   = Math.random() * mapW2
+        pos[i*3+1] = 0.4 + Math.random() * 3.2
+        pos[i*3+2] = Math.random() * mapH2
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color: a.particleColor, size: 0.11, transparent: true, opacity: 0.75 }))
+      wg.add(pts)
+      particlesRef.current = pts
+    }
+  }, [])
+
+  // ── Three.js init (runs once on mount) ────────────────────────────────────
+  useEffect(() => {
+    if (initDoneRef.current) return
+    const el = mountRef.current
+    if (!el) return
+
+    // Defer one frame so the div has real layout dimensions
+    const raf = requestAnimationFrame(() => {
+      if (!mountRef.current) return
+      initDoneRef.current = true
+
+      const W2 = mountRef.current.clientWidth  || window.innerWidth
+      const H2 = mountRef.current.clientHeight || window.innerHeight
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true })
+      renderer.setSize(W2, H2)
+      renderer.shadowMap.enabled = true
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+      mountRef.current.appendChild(renderer.domElement)
+      rendererRef.current = renderer
+
+      const scene = new THREE.Scene()
+      scene.background = new THREE.Color(0x87ceeb)
+      sceneRef.current = scene
+
+      const camera = new THREE.PerspectiveCamera(52, W2 / H2, 0.1, 400)
+      cameraRef.current = camera
+
+      const sun = new THREE.DirectionalLight(0xfff5dd, 1.3)
+      sun.position.set(30, 45, 20)
+      sun.castShadow = true
+      sun.shadow.mapSize.set(2048, 2048)
+      sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 200
+      sun.shadow.camera.left = -50; sun.shadow.camera.right = 50
+      sun.shadow.camera.top  =  50; sun.shadow.camera.bottom = -50
+      scene.add(sun); sunRef.current = sun
+
+      const ambient = new THREE.AmbientLight(0xc8e8ff, 0.7)
+      scene.add(ambient); ambientRef.current = ambient
+
+      // Player
+      const player = makeHumanoid(0x4488ff, 0xff8800, 0x224499, 1.0)
+      scene.add(player); playerRef.current = player
+
+      // Build world from current state
+      const s = stateRef.current
+      buildWorld(s.currentArea)
+
+      // Position player
+      const px = s.playerPos.x * T + T * 0.5
+      const pz = s.playerPos.y * T + T * 0.5
+      player.position.set(px, 0, pz)
+      playerTargetRef.current.set(px, 0, pz)
+      camera.position.set(px, 16, pz + 22)
+      camera.lookAt(px, 1, pz)
+
+      // Resize
+      const onResize = () => {
+        if (!mountRef.current || !rendererRef.current) return
+        const w = mountRef.current.clientWidth || window.innerWidth
+        const h = mountRef.current.clientHeight || window.innerHeight
+        camera.aspect = w / h; camera.updateProjectionMatrix()
+        rendererRef.current.setSize(w, h)
+      }
+      window.addEventListener('resize', onResize)
+
+      // Animation loop
+      const animate = () => {
+        frameRef.current = requestAnimationFrame(animate)
+        const t = performance.now() * 0.001
+
+        // Water shimmer
+        waterMeshesRef.current.forEach((w, i) => {
+          w.position.y = 0.07 + Math.sin(t * 1.4 + i * 0.6) * 0.022
+          const mat = w.material as THREE.MeshLambertMaterial
+          const base = new THREE.Color(w.userData.baseHex as number ?? 0x2255cc)
+          mat.color.copy(base).multiplyScalar(0.9 + Math.sin(t * 0.9 + i * 0.5) * 0.12)
+        })
+
+        // Quiz orbs
+        worldGroupRef.current?.traverse(obj => {
+          if (obj.userData.isQuizOrb) { obj.rotation.y += 0.034; obj.rotation.x = Math.sin(t * 1.1) * 0.22 }
+        })
+
+        // Portal gems spin + light pulse
+        portalGroupsRef.current.forEach((pg, i) => {
+          const pl = pg.userData.pointLight as THREE.PointLight
+          if (pl) pl.intensity = 1.8 + Math.sin(t * 2.4 + i * 1.2) * 0.9
+          pg.traverse(obj => { if (obj.userData.isGem) { obj.rotation.y += 0.04; obj.rotation.x += 0.025 } })
+        })
+
+        // Particles
+        if (particlesRef.current) {
+          const pos = (particlesRef.current.geometry.attributes.position as THREE.BufferAttribute).array as Float32Array
+          for (let i = 0; i < pos.length / 3; i++) {
+            pos[i*3+1] += Math.sin(t * 0.7 + i * 0.3) * 0.003
+            pos[i*3]   += Math.cos(t * 0.5 + i * 0.4) * 0.004
+          }
+          particlesRef.current.geometry.attributes.position.needsUpdate = true
+        }
+
+        // NPC idle bob
+        npcGroupsRef.current.forEach((npc, i) => {
+          npc.position.y = Math.sin(t * 1.1 + i * 1.4) * 0.06
+          npc.rotation.y = Math.sin(t * 0.3 + i * 0.9) * 0.35
+        })
+
+        // Player lerp + walk anim
+        if (playerRef.current) {
+          const pm = playerRef.current
+          pm.position.lerp(playerTargetRef.current, 0.20)
+          // Smooth rotation lerp every frame
+          const cur = pm.rotation.y
+          const target = playerRotRef.current
+          const diff = ((target - cur + Math.PI) % (Math.PI * 2)) - Math.PI
+          pm.rotation.y += diff * 0.18
+          const moving = pm.position.distanceTo(playerTargetRef.current) > 0.08
+          if (moving) {
+            pm.position.y = Math.abs(Math.sin(t * 9)) * 0.09
+            const ll = pm.userData.legL as THREE.Mesh
+            const lr = pm.userData.legR as THREE.Mesh
+            const al = pm.userData.armL as THREE.Mesh
+            const ar = pm.userData.armR as THREE.Mesh
+            if (ll) ll.position.y = 0.28 + Math.sin(t * 9) * 0.14
+            if (lr) lr.position.y = 0.28 - Math.sin(t * 9) * 0.14
+            if (al) al.rotation.x =  Math.sin(t * 9) * 0.34
+            if (ar) ar.rotation.x = -Math.sin(t * 9) * 0.34
+          } else {
+            pm.position.y = 0
+          }
+        }
+
+        // Camera follow
+        if (playerRef.current && cameraRef.current) {
+          const pp = playerRef.current.position
+          camera.position.x += (pp.x      - camera.position.x) * 0.07
+          camera.position.y += (16        - camera.position.y) * 0.05
+          camera.position.z += (pp.z + 22 - camera.position.z) * 0.07
+          camera.lookAt(pp.x, 1.2, pp.z)
+        }
+
+        // Sun follows player
+        if (playerRef.current && sunRef.current) {
+          const pp = playerRef.current.position
+          sun.position.set(pp.x + 30, 45, pp.z + 20)
+          sun.target.position.copy(pp)
+          sun.target.updateMatrixWorld()
+        }
+
+        renderer.render(scene, camera)
+      }
+      frameRef.current = requestAnimationFrame(animate)
+
+      // Store cleanup
+      ;(mountRef.current as HTMLElement & { _cleanup?: () => void })._cleanup = () => {
+        cancelAnimationFrame(frameRef.current)
+        window.removeEventListener('resize', onResize)
+        renderer.dispose()
+      }
+    })
+
+    return () => {
+      cancelAnimationFrame(raf)
+      const el2 = mountRef.current as (HTMLElement & { _cleanup?: () => void }) | null
+      el2?._cleanup?.()
+      initDoneRef.current = false
+    }
+  }, [buildWorld])
+
+  // Rebuild world when area changes
+  useEffect(() => {
+    if (!initDoneRef.current) return
+    buildWorld(state.currentArea)
+  }, [state.currentArea, buildWorld])
+
+  // Sync player position + rotation target
+  useEffect(() => {
+    const wx = state.playerPos.x * T + T * 0.5
+    const wz = state.playerPos.y * T + T * 0.5
+    playerTargetRef.current.set(wx, 0, wz)
+    // Set rotation target - animation loop lerps to it each frame
+    // Three.js model faces +Z by default (toward camera = "down")
+    // left (-X) → rotate CCW = +π/2 around Y
+    // right (+X) → rotate CW  = -π/2 around Y
+    const dir = state.playerDir
+    playerRotRef.current = dir==='left' ? -Math.PI/2 : dir==='right' ? Math.PI/2 : dir==='up' ? Math.PI : 0
+  }, [state.playerPos, state.playerDir])
+
+  // Input
+  useEffect(() => {
+    if (state.phase !== 'exploring') return
+    inputHandler.init()
+
+    const handleKey = (key: string) => {
+      const now = Date.now()
+      if (now - lastMoveRef.current < MOVE_COOLDOWN) return
+      lastMoveRef.current = now
+
+      const s = stateRef.current
+      const area = AREAS[s.currentArea]
+      if (!area) return
+      const { x, y } = s.playerPos
+      let nx = x, ny = y, dir: 'up'|'down'|'left'|'right' = s.playerDir
+
+      if      (key==='ArrowUp'   ||key==='w'||key==='W') { ny--; dir='up'    }
+      else if (key==='ArrowDown' ||key==='s'||key==='S') { ny++; dir='down'  }
+      else if (key==='ArrowLeft' ||key==='a'||key==='A') { nx--; dir='left'  }
+      else if (key==='ArrowRight'||key==='d'||key==='D') { nx++; dir='right' }
+      else if (key===' ') { dispatch({type:'SET_PHASE',phase:'inventory'}); return }
+      else if (key==='e'||key==='E'||key==='Enter') {
+        const fd = s.playerDir
+        let fx = x, fy = y
+        if (fd==='up') fy--; else if (fd==='down') fy++
+        else if (fd==='left') fx--; else if (fd==='right') fx++
+        handleInteract(x, y, fx, fy, area)
+        return
+      } else return
+
+      // Always update direction first so player faces right way before moving
+      if (dir !== s.playerDir) dispatch({type:'MOVE_PLAYER', x, y, dir})
+
+      if (nx < 0 || nx >= area.cols || ny < 0 || ny >= area.rows) return
+      const tile = area.map[ny]?.[nx] as TileType | undefined
+      if (tile === undefined) return
+
+      // Portal step-on
+      if (tile === 6) {
+        const portal = area.portals.find(p => p.x === nx && p.y === ny)
+        if (portal) { dispatch({type:'TRANSITION_AREA', area:portal.to, x:portal.tx, y:portal.ty}); return }
+      }
+
+      // Hard blocks: trees(1), walls(2), water(4) — everything else is walkable
+      if (tile === 1 || tile === 2 || tile === 4) return
+
+      // NPCs block movement (player can face them, use E to talk)
+      if (area.npcs.find(n => n.x === nx && n.y === ny)) return
+
+      dispatch({type:'MOVE_PLAYER', x:nx, y:ny, dir})
+
+      // Wild encounter in tall grass
+      if (tile === 5 && Math.random() < 0.13) {
+        const monId = area.monIds[Math.floor(Math.random() * area.monIds.length)]
+        const lv = 3 + Math.floor(Math.random() * 9)
+        setTimeout(() => dispatch({type:'START_BATTLE', monId, lv}), 200)
+      }
+    }
+
+    const handleInteract = (px: number, py: number, fx: number, fy: number, area: Area) => {
+      // Standing on quiz station
+      if ((area.map[py]?.[px] as TileType) === 7) { dispatch({type:'START_QUIZ'}); return }
+      // Facing quiz station
+      if ((area.map[fy]?.[fx] as TileType) === 7) { dispatch({type:'START_QUIZ'}); return }
+      // Facing portal
+      if ((area.map[fy]?.[fx] as TileType) === 6) {
+        const portal = area.portals.find(p => p.x === fx && p.y === fy)
+        if (portal) { dispatch({type:'TRANSITION_AREA', area:portal.to, x:portal.tx, y:portal.ty}); return }
+      }
+      // NPC directly in front or adjacent
+      const npcIdx = area.npcs.findIndex(n => n.x === fx && n.y === fy)
+      const npcIdxFallback = npcIdx === -1
+        ? area.npcs.findIndex(n => Math.abs(n.x - px) + Math.abs(n.y - py) === 1)
+        : -1
+      const realIdx = npcIdx !== -1 ? npcIdx : npcIdxFallback
+      if (realIdx === -1) return
+      const npc = area.npcs[realIdx]
+      const areaKey = stateRef.current.currentArea
+      const defeatedKey = `${areaKey}__${realIdx}`
+      const talkedKey = `${areaKey}__${realIdx}`
+      const isDefeated = stateRef.current.npcDefeated[defeatedKey]
+      const hasTalked = stateRef.current.npcTalked[talkedKey]
+
+      // Classify NPC
+      const battleLine = npc.lines.find(l => typeof l !== 'string' && l.type === 'battle') as { type: string; monId?: number; text?: string } | undefined
+      const quizLine = npc.lines.find(l => typeof l !== 'string' && l.type === 'quiz') as { type: string; text?: string } | undefined
+      const hasBattle = !!battleLine
+      const hasQuiz = !!quizLine
+
+      // Already defeated (battle won or quiz answered) — show post-interaction message
+      if (isDefeated) {
+        const postText = hasBattle
+          ? "...I need to train harder. Come back when you want a rematch!"
+          : "You already answered my question correctly. Well done, trainer!"
+        dispatch({ type: 'START_DIALOGUE', lines: [{ speaker: npc.name, text: postText, color: npc.color }] })
+        return
+      }
+
+      // Non-battle, non-quiz NPC that has already been talked to — repeat last line only
+      if (!hasBattle && !hasQuiz && hasTalked) {
+        const lastLine = npc.lines[npc.lines.length - 1]
+        const text = typeof lastLine === 'string' ? lastLine : (lastLine.text ?? '')
+        dispatch({ type: 'START_DIALOGUE', lines: [{ speaker: npc.name, text, color: npc.color }] })
+        return
+      }
+
+      // Mark talked (first time through full dialogue)
+      if (!hasTalked) {
+        dispatch({ type: 'MARK_NPC_TALKED', area: areaKey, npcIndex: realIdx })
+      }
+
+      // Build dialogue lines, extracting pendingBattle from battle line
+      const dialogueLines = npcLinesToDialogue(npc)
+      const pendingBattle = battleLine
+        ? { monId: battleLine.monId ?? 1, lv: 5 + Math.floor(Math.random() * 5) }
+        : null
+
+      dispatch({ type: 'START_DIALOGUE', lines: dialogueLines, pendingBattle })
+
+      // Store NPC info for post-interaction defeat marking
+      if (hasBattle) {
+        // BattleWatcher will read this and dispatch MARK_NPC_DEFEATED on win
+        sessionStorage.setItem('pendingNpcDefeated', JSON.stringify({ area: areaKey, npcIndex: realIdx }))
+      }
+      if (hasQuiz) {
+        // QuizModal will read this and dispatch MARK_NPC_DEFEATED on answer
+        sessionStorage.setItem('pendingNpcQuiz', JSON.stringify({ area: areaKey, npcIndex: realIdx }))
+      }
+    }
+
+    const npcLinesToDialogue = (npc: NpcData) =>
+      npc.lines.map(l => {
+        if (typeof l === 'string') return {speaker: npc.name, text: l, color: npc.color}
+        if (l.type==='quiz')   return {speaker: npc.name, text:(l.text??'Quiz time!')+' [QUIZ]',   color:npc.color}
+        if (l.type==='battle') return {speaker: npc.name, text:(l.text??'Battle! Face me!')+' [BATTLE]', color:npc.color}
+        return {speaker: npc.name, text: l.text ?? '', color: npc.color}
+      })
+
+    const KEYS = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','s','a','d','W','S','A','D',' ','e','E','Enter']
+    KEYS.forEach(k => inputHandler.on(k, handleKey))
+    return () => KEYS.forEach(k => inputHandler.off(k, handleKey))
+  }, [state.phase, dispatch])
+
+  return <div ref={mountRef} style={{ width:'100%', height:'100%', display:'block' }} />
+}

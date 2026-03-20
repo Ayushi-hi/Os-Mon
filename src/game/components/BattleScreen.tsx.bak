@@ -1,0 +1,247 @@
+import { useState, useEffect } from 'react'
+import { useGame } from '../../context/GameContext'
+import { MOVES } from '../data/osmons'
+import MonSprite from './MonSprite'
+
+const TYPE_COLORS: Record<string, string> = {
+  Process:'#4488ff', Memory:'#9944ee', FileSystem:'#66aa33',
+  Kernel:'#ff7700', Network:'#2288ee', Sync:'#ee44bb',
+}
+
+function HpBar({ cur, max, name, lv, status, side, xp, xpToNext }:
+  { cur:number; max:number; name:string; lv:number; status:string; side:'player'|'wild'; xp?:number; xpToNext?:number }) {
+  const pct = Math.max(0, Math.min(100, (cur / max) * 100))
+  const col = pct > 50 ? '#3db83d' : pct > 20 ? '#d4a017' : '#c82020'
+  const isPlayer = side === 'player'
+  const xpPct = (xp != null && xpToNext) ? Math.min(100, (xp / xpToNext) * 100) : 0
+  return (
+    <div style={{
+      background:'rgba(4,4,20,0.92)', border:'1.5px solid #1a3a6e',
+      padding:'10px 14px', minWidth: 210,
+      borderRadius: isPlayer ? '0 0 4px 4px' : '4px 4px 0 0',
+    }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4 }}>
+        <span className="font-pixel" style={{ fontSize:9, color:'#e8c870' }}>{name}</span>
+        <span className="font-pixel" style={{ fontSize:7, color:'#e8a020' }}>Lv.{lv}</span>
+      </div>
+      {status !== 'none' && (
+        <div className="font-pixel" style={{
+          fontSize:6, background:'#3a1500', color:'#ff9955',
+          padding:'2px 5px', display:'inline-block', marginBottom:4, borderRadius:2
+        }}>{status.toUpperCase()}</div>
+      )}
+      <div style={{ height:7, background:'#111', border:'1px solid #333', borderRadius:3, overflow:'hidden' }}>
+        <div style={{ height:'100%', width:`${pct}%`, background:col, transition:'width 0.45s ease', borderRadius:3 }} />
+      </div>
+      <div style={{ display:'flex', justifyContent:'space-between', marginTop:3 }}>
+        <span className="font-pixel" style={{ fontSize:7, color:'#445' }}>HP</span>
+        <span className="font-pixel" style={{ fontSize:7, color:'#889' }}>{cur}/{max}</span>
+      </div>
+      {isPlayer && xp != null && xpToNext != null && (
+        <div style={{ marginTop:4 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', marginBottom:2 }}>
+            <span className="font-pixel" style={{ fontSize:6, color:'#2244aa' }}>XP</span>
+            <span className="font-pixel" style={{ fontSize:6, color:'#2244aa' }}>{xp}/{xpToNext}</span>
+          </div>
+          <div style={{ height:3, background:'#111', borderRadius:2, overflow:'hidden' }}>
+            <div style={{ height:'100%', width:`${xpPct}%`, background:'#3366ff', borderRadius:2, transition:'width 0.5s' }} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MoveBtn({ moveId, onClick, disabled }:{ moveId:string; onClick:()=>void; disabled:boolean }) {
+  const mv = MOVES[moveId]
+  if (!mv) return null
+  const col = TYPE_COLORS[mv.type] ?? '#888'
+  return (
+    <button
+      disabled={disabled} onClick={onClick}
+      className="font-pixel cursor-pointer text-left"
+      style={{
+        flex:1, padding:'9px 10px', fontSize:7,
+        background:`${col}12`, border:`1.5px solid ${col}55`,
+        color:'#dde', lineHeight:1.7,
+        transition:'all 0.12s',
+      }}
+      onMouseEnter={e=>{ if(!disabled) { (e.currentTarget as HTMLButtonElement).style.background=`${col}28`; (e.currentTarget as HTMLButtonElement).style.borderColor=col }}}
+      onMouseLeave={e=>{ (e.currentTarget as HTMLButtonElement).style.background=`${col}12`; (e.currentTarget as HTMLButtonElement).style.borderColor=`${col}55` }}>
+      <div style={{ color:'#eee', marginBottom:2 }}>{mv.name}</div>
+      <div style={{ color:col, fontSize:6 }}>{mv.type} · PWR {mv.power} · ACC {mv.accuracy}</div>
+    </button>
+  )
+}
+
+export default function BattleScreen() {
+  const { state, dispatch } = useGame()
+  const { wildMon, party, battlePhase, battleLog, battleResult, items } = state
+  const player = party[0]
+  const [showMoves, setShowMoves] = useState(false)
+
+  useEffect(() => { if (battlePhase !== 'menu') setShowMoves(false) }, [battlePhase])
+
+  useEffect(() => {
+    if (battlePhase !== 'end') return
+    const t = setTimeout(() => dispatch({ type:'SET_PHASE', phase:'exploring' }), 2600)
+    return () => clearTimeout(t)
+  }, [battlePhase, dispatch])
+
+  if (!wildMon || !player) return null
+
+  const isAnimating = battlePhase === 'animating'
+  const isEnd = battlePhase === 'end'
+
+  const resultMsg =
+    battleResult==='win'    ? `${wildMon.name} fainted! Victory!` :
+    battleResult==='caught' ? `Gotcha! ${wildMon.name} caught!`   :
+    battleResult==='ran'    ? 'Got away safely!'                   :
+    battleResult==='lose'   ? `${player.name} fainted...`         : ''
+
+  const resultCol =
+    battleResult==='win'||battleResult==='caught' ? '#44ff88' :
+    battleResult==='ran' ? '#aaaaff' : '#ff6666'
+
+  return (
+    <div className="absolute inset-0 z-20 flex flex-col"
+      style={{ background:'linear-gradient(180deg,#061224 0%,#040e1c 50%,#060d06 50%,#0a1208 100%)' }}>
+
+      {/* Battle arena */}
+      <div className="relative" style={{ flex:'1 1 0', overflow:'hidden' }}>
+
+        {/* Ground shadows */}
+        <div style={{ position:'absolute', bottom:110, right:110, width:120, height:18,
+          background:'radial-gradient(ellipse,rgba(255,255,255,0.13),transparent)', borderRadius:'50%' }} />
+        <div style={{ position:'absolute', bottom:64, left:70, width:95, height:14,
+          background:'radial-gradient(ellipse,rgba(255,255,255,0.10),transparent)', borderRadius:'50%' }} />
+
+        {/* Wild mon — top right */}
+        <div style={{ position:'absolute', top:16, right:80, filter: isEnd && battleResult==='win' ? 'grayscale(1) opacity(0.3)' : undefined, transition:'filter 0.5s' }}>
+          <MonSprite mon={wildMon} size={148} flip={true} animate={!isEnd} />
+        </div>
+        <div style={{ position:'absolute', top:14, left:14 }}>
+          <HpBar cur={wildMon.curHp} max={wildMon.maxHp} name={wildMon.name} lv={wildMon.lv} status={wildMon.status} side="wild" />
+          <div className="font-pixel" style={{ fontSize:6, color:'#445566', padding:'3px 14px',
+            background:'rgba(4,4,20,0.70)', borderTop:'1px solid #1a3a6e' }}>
+            {wildMon.concept} · {wildMon.type}
+          </div>
+        </div>
+
+        {/* Player mon — bottom left */}
+        <div style={{ position:'absolute', bottom:72, left:40, filter: isEnd && battleResult==='lose' ? 'grayscale(1) opacity(0.3)' : undefined, transition:'filter 0.5s' }}>
+          <MonSprite mon={player} size={118} flip={false} animate={!isEnd} />
+        </div>
+        <div style={{ position:'absolute', bottom:68, right:14 }}>
+          <HpBar cur={player.curHp} max={player.maxHp} name={player.name} lv={player.lv}
+            status={player.status} side="player"
+            xp={player.xp ?? 0} xpToNext={player.xpToNext} />
+          <div className="font-pixel" style={{ fontSize:6, color:'#2a3a5a', padding:'2px 14px',
+            background:'rgba(4,4,20,0.70)', borderTop:'1px solid #1a3a6e' }}>
+            ATK:{player.atkScaled ?? player.attack} &nbsp; DEF:{player.defScaled ?? player.defense} &nbsp; SPD:{player.spdScaled ?? player.speed}
+          </div>
+        </div>
+
+        {/* Result overlay */}
+        {isEnd && resultMsg && (
+          <div className="absolute inset-0 flex items-center justify-center"
+            style={{ background:'rgba(0,0,0,0.65)', animation:'fadeIn 0.3s ease' }}>
+            <div className="font-pixel text-center" style={{
+              padding:'20px 32px', fontSize:12, lineHeight:1.9,
+              background:'rgba(4,4,16,0.96)', border:`2px solid ${resultCol}`,
+              color: resultCol,
+            }}>
+              {resultMsg}
+              <div className="font-vt" style={{ fontSize:16, color:'#556', marginTop:6 }}>
+                Returning to world...
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom UI */}
+      <div style={{ height:210, display:'flex', borderTop:'2px solid #1a3a6e', background:'rgba(4,4,16,0.97)' }}>
+
+        {/* Battle log */}
+        <div style={{ flex:1, padding:'10px 14px', overflowY:'auto', borderRight:'1.5px solid #0d2040',
+          fontFamily:"'VT323',monospace", fontSize:18, lineHeight:1.75, color:'#ccd' }}>
+          {battleLog.slice(-5).map((line, i) => (
+            <div key={i} style={{
+              color: line.includes('fainted') ? '#ff8888' :
+                     line.includes('caught') || line.includes('Caught') ? '#88ff88' :
+                     line.includes('appeared') ? '#ffffaa' :
+                     line.includes('used') ? '#aaccff' : '#aab',
+              opacity: i < battleLog.slice(-5).length - 1 ? 0.6 + i * 0.1 : 1,
+            }}>{line}</div>
+          ))}
+        </div>
+
+        {/* Action panel */}
+        <div style={{ width:360, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+          {isEnd ? (
+            <div className="font-pixel" style={{ fontSize:8, color:'#334', textAlign:'center', margin:'auto' }}>
+              Returning to world...
+            </div>
+          ) : !showMoves ? (
+            <>
+              <div style={{ display:'flex', gap:8 }}>
+                <button className="font-pixel cursor-pointer" disabled={isAnimating}
+                  style={{ flex:1, padding:'10px 6px', fontSize:8, background:'#1a0808', color:'#ff9988', border:'1.5px solid #ff4444', transition:'all 0.12s' }}
+                  onMouseEnter={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#2a0808'}}
+                  onMouseLeave={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#1a0808'}}
+                  onClick={() => setShowMoves(true)}>⚔ FIGHT</button>
+                <button className="font-pixel cursor-pointer" disabled={isAnimating || items.kernelball <= 0}
+                  style={{ flex:1, padding:'10px 6px', fontSize:8, background:'#08182e', color:'#88ccff', border:'1.5px solid #4488ff', transition:'all 0.12s' }}
+                  onMouseEnter={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#0a1e38'}}
+                  onMouseLeave={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#08182e'}}
+                  onClick={() => dispatch({ type:'THROW_BALL', ballType:'kernelball' })}>
+                  ◉ BALL <span style={{ fontSize:7, color:'#4488ff' }}>({items.kernelball})</span>
+                </button>
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <button className="font-pixel cursor-pointer" disabled={isAnimating}
+                  style={{ flex:1, padding:'10px 6px', fontSize:8, background:'#081808', color:'#88ff88', border:'1.5px solid #44aa44', transition:'all 0.12s' }}
+                  onMouseEnter={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#0a2008'}}
+                  onMouseLeave={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#081808'}}
+                  onClick={() => dispatch({ type:'RUN' })}>↩ RUN</button>
+                <button className="font-pixel cursor-pointer" disabled={isAnimating || items.potion <= 0}
+                  style={{ flex:1, padding:'10px 6px', fontSize:8, background:'#181808', color:'#ffffaa', border:'1.5px solid #aaaa44', transition:'all 0.12s' }}
+                  onMouseEnter={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#202008'}}
+                  onMouseLeave={e=>{ (e.currentTarget as HTMLButtonElement).style.background='#181808'}}
+                  onClick={() => dispatch({ type:'USE_POTION' })}>
+                  ✦ HEAL <span style={{ fontSize:7, color:'#aaaa44' }}>({items.potion})</span>
+                </button>
+              </div>
+              {items.superball > 0 && (
+                <button className="font-pixel cursor-pointer" disabled={isAnimating}
+                  style={{ padding:'8px 6px', fontSize:7, background:'#0a1030', color:'#aaddff', border:'1px solid #2255aa' }}
+                  onClick={() => dispatch({ type:'THROW_BALL', ballType:'superball' })}>
+                  ◎ SUPER BALL ({items.superball}) — higher catch rate
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ display:'flex', gap:6 }}>
+                {player.moves.slice(0,2).map(mId => (
+                  <MoveBtn key={mId} moveId={mId} disabled={isAnimating}
+                    onClick={() => { dispatch({type:'PLAYER_MOVE',moveId:mId}); setShowMoves(false) }} />
+                ))}
+              </div>
+              <div style={{ display:'flex', gap:6 }}>
+                {player.moves.slice(2,4).map(mId => (
+                  <MoveBtn key={mId} moveId={mId} disabled={isAnimating}
+                    onClick={() => { dispatch({type:'PLAYER_MOVE',moveId:mId}); setShowMoves(false) }} />
+                ))}
+              </div>
+              <button className="font-pixel cursor-pointer"
+                style={{ padding:'7px', fontSize:7, background:'#0a0a14', color:'#445', border:'1px solid #1a2a3a' }}
+                onClick={() => setShowMoves(false)}>← BACK</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
